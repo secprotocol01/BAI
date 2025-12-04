@@ -44,6 +44,11 @@ hcxlabtools
 sqlmap
 metasploit
 spiderfoot
+bubblewrap
+firejail
+toolbox
+podman
+plymouth-theme-ossecure
 %end
 
 #========================================================
@@ -71,7 +76,10 @@ kernel.kexec_load_disabled=1
 net.ipv4.conf.all.rp_filter=1
 net.ipv4.conf.default.rp_filter=1
 kernel.randomize_va_space=2
+net.ipv6.conf.all.disable_ipv6=1
+net.ipv6.conf.default.disable_ipv6=1
 EOF
+sysctl --system
 
 #-------------------------------
 # 4.3) Systemd sandboxing defaults
@@ -193,5 +201,77 @@ table inet tor {
 }
 EOF
 systemctl enable nftables
+
+#-------------------------------
+# 5) Qubes‑like sandbox compartments
+#-------------------------------
+mkdir -p /opt/sandboxes
+semanage fcontext -a -t container_file_t "/opt/sandboxes(/.*)?"
+restorecon -Rv /opt/sandboxes
+
+cat <<'EOF' >/etc/firejail/default.profile
+private
+seccomp
+caps.drop all
+nofiles 1024
+protocol unix,inet,inet6
+apparmor none
+EOF
+
+#-------------------------------
+# 6) Hidden LUKS container setup (optional)
+#-------------------------------
+cat <<'EOF' >/usr/local/bin/hidden-luks.sh
+#!/bin/bash
+DEVICE=/dev/sdb
+HEADER=/root/hidden_header
+cryptsetup luksFormat --type luks1 $DEVICE
+dd if=/dev/urandom of=$HEADER bs=4096 count=1
+cryptsetup luksHeaderBackup --header-backup-file $HEADER $DEVICE
+cryptsetup open --header $HEADER $DEVICE hidden_container
+mkfs.ext4 /dev/mapper/hidden_container
+mkdir -p /mnt/hidden
+mount /dev/mapper/hidden_container /mnt/hidden
+chmod 700 /mnt/hidden
+EOF
+chmod +x /usr/local/bin/hidden-luks.sh
+
+#-------------------------------
+# 7) SSH hardening
+#-------------------------------
+sed -i 's/^#PermitRootLogin yes/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/^#PermitEmptyPasswords yes/PermitEmptyPasswords no/' /etc/ssh/sshd_config
+echo "AllowUsers ossecure" >> /etc/ssh/sshd_config
+systemctl restart sshd
+
+#-------------------------------
+# 8) Custom hardened kernel (Secure Boot ready)
+#-------------------------------
+mkdir -p /usr/src/kernel
+cd /usr/src/kernel
+# Assuming /root/custom_kernel.config is included in ISO
+cp /root/custom_kernel.config .config
+
+# Build kernel
+dnf install -y ncurses-devel bc bison flex elfutils-libelf-devel openssl-devel pesign
+wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.7.1.tar.xz
+tar xf linux-6.7.1.tar.xz
+cd linux-6.7.1
+cp /root/custom_kernel.config .config
+make -j$(nproc) bzImage modules
+make modules_install
+make install
+
+# Sign kernel modules
+for mod in $(find /lib/modules/$(uname -r)/ -type f -name '*.ko'); do
+    pesign --sign --key /root/secureboot.key --cert /root/secureboot.crt --in "$mod" --out "$mod"
+done
+grub2-mkconfig -o /boot/grub2/grub.cfg
+
+#-------------------------------
+# 9) Plymouth theme
+#-------------------------------
+plymouth-set-default-theme -R ossecure
 
 %end
